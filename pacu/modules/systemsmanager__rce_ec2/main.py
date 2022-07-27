@@ -254,7 +254,6 @@ def main(args, pacu_main):
 
     # If there are target instances passed in as arguments, fix instances and regions
     if args.target_instances is not None:
-        instances = []
         regions = []
         if ',' in args.target_instances:
             # Multiple instances passed in
@@ -264,14 +263,14 @@ def main(args, pacu_main):
             split = [args.target_instances]
         for instance in split:
             instance_at_region_split = instance.split('@')
-            instances.append({
-                'InstanceId': instance_at_region_split[0],
-                'Region': instance_at_region_split[1]
-            })
-            regions.append(instance_at_region_split[1])
-        # Kill duplicate regions
-        regions = list(set(regions))
-
+            ec2Instances = instances
+            instances =[]
+            for ins in ec2Instances:
+                if ins['InstanceId'] == instance_at_region_split[0]:
+                     instances.append(ins)
+                     regions.append(instance_at_region_split[1])
+                # Kill duplicate regions
+                regions = list(set(regions))  
     # Start attaching the instance profile to the vulnerable instances
     print('Starting to attach the instance profile to target EC2 instances...\n')
     # args.replace is the static argument passed in from the user, but the
@@ -291,40 +290,39 @@ def main(args, pacu_main):
         # total API calls made.
         instances_to_replace = []
         for instance in instances:
-            if instance['State']['Name'] == 'running' or instance['State']['Name'] == 'stopped':
-                if instance['Region'] == region:
-                    if args.target_instances is not None or args.all_instances is True or instance['ImageId'] in vuln_images:
-                        if 'IamInstanceProfile' in instance:
-                            # The instance already has an instance profile attached, add it to
-                            # targets if it is an SSM instance profile, skip it if args.replace
-                            # is not True, otherwise add it to instances_to_replace
-                            if instance['IamInstanceProfile']['Arn'] == ssm_instance_profile_arn:
-                                print('  Instance ID {} already has a Systems Manager instance profile attached to it. Adding to target list...\n'.format(instance['InstanceId']))
-                                targeted_instances.append(instance['InstanceId'])
-                            elif args.replace is True and replace is True:
-                                instances_to_replace.append(instance['InstanceId'])
-                            else:
-                                print('  Instance ID {} already has an instance profile attached to it, skipping...'.format(instance['InstanceId']))
-                                pass
-                        else:
-                            # There is no instance profile attached yet, do it now
-                            response = client.associate_iam_instance_profile(
-                                InstanceId=instance['InstanceId'],
-                                IamInstanceProfile={
-                                    'Arn': ssm_instance_profile_arn,
-                                    'Name': ssm_instance_profile_name
-                                }
-                            )
+            if instance['Region'] == region:
+                if args.target_instances is not None or args.all_instances is True or instance['ImageId'] in vuln_images:
+                    if 'IamInstanceProfile' in instance:
+                        # The instance already has an instance profile attached, add it to
+                        # targets if it is an SSM instance profile, skip it if args.replace
+                        # is not True, otherwise add it to instances_to_replace
+                        if instance['IamInstanceProfile']['Arn'] == ssm_instance_profile_arn:
+                            print('  Instance ID {} already has a Systems Manager instance profile attached to it. Adding to target list...\n'.format(instance['InstanceId']))
                             targeted_instances.append(instance['InstanceId'])
-                            for instance_in_db in ec2_data['Instances']:
-                                if 'IamInstanceProfile' not in instance_in_db:
-                                    instance_in_db['IamInstanceProfile'] = {}
+                        elif args.replace is True and replace is True:
+                            instances_to_replace.append(instance['InstanceId'])
+                        else:
+                            print('  Instance ID {} already has an instance profile attached to it, skipping...'.format(instance['InstanceId']))
+                            pass
+                    else:
+                        # There is no instance profile attached yet, do it now
+                        response = client.associate_iam_instance_profile(
+                            InstanceId=instance['InstanceId'],
+                            IamInstanceProfile={
+                                'Arn': ssm_instance_profile_arn,
+                                'Name': ssm_instance_profile_name
+                            }
+                        )
+                        targeted_instances.append(instance['InstanceId'])
+                        for instance_in_db in ec2_data['Instances']:
+                            if 'IamInstanceProfile' not in instance_in_db:
+                                instance_in_db['IamInstanceProfile'] = {}
 
-                                if instance_in_db['InstanceId'] == instance['InstanceId']:
-                                    instance_in_db['IamInstanceProfile']['Arn'] = ssm_instance_profile_arn
-                                    instance_in_db['IamInstanceProfile']['Id'] = ssm_instance_profile_id
-                                    break
-                            print('  Instance profile attached to instance ID {}.'.format(instance['InstanceId']))
+                            if instance_in_db['InstanceId'] == instance['InstanceId']:
+                                instance_in_db['IamInstanceProfile']['Arn'] = ssm_instance_profile_arn
+                                instance_in_db['IamInstanceProfile']['Id'] = ssm_instance_profile_id
+                                break
+                        print('  Instance profile attached to instance ID {}.'.format(instance['InstanceId']))
         if len(instances_to_replace) > 0 and replace is True:
             # There are instances that need their role replaced, so discover association IDs to make that possible
             all_associations = []
@@ -399,13 +397,15 @@ def main(args, pacu_main):
             # Enumerate instances that appear available to Systems Manager
             response = client.describe_instance_information()
             for instance in response['InstanceInformationList']:
-                discovered_instances.append([instance['InstanceId'], instance['PlatformType']])
+                if 'PlatformType' in instance:
+                        discovered_instances.append([instance['InstanceId'], instance['PlatformType']])
             while 'NextToken' in response:
                 response = client.describe_instance_information(
                     NextToken=response['NextToken']
                 )
                 for instance in response['InstanceInformationList']:
-                    discovered_instances.append([instance['InstanceId'], instance['PlatformType']])
+                    if 'PlatformType' in instance:
+                        discovered_instances.append([instance['InstanceId'], instance['PlatformType']])
 
             for instance in discovered_instances:
                 # Has this instance been attacked yet?
@@ -413,13 +413,8 @@ def main(args, pacu_main):
                     if args.target_os.lower() == 'all' or instance[1].lower() == args.target_os.lower():
                         # Is this instance eligible for an attack, but was not targeted?
                         if instance[0] not in targeted_instances:
-                            action = input('  Instance ID {} (Platform: {}) was not found in the list of targeted instances, but it might be possible to attack it, do you want to try and attack this instance (a) or ignore it (i)? (a/i) '.format(instance[0], instance[1]))
-                            if action == 'i':
-                                ignored_instances.append(instance[0])
-                                continue
-                            else:
-                                print('  Adding instance ID {} to list of targets.\n'.format(instance[0]))
-                                targeted_instances.append(instance[0])
+                            ignored_instances.append(instance[0])
+                            continue
                         if instance[1].lower() == 'windows':
                             windows_instances_to_attack.append(instance[0])
                         elif instance[1].lower() == 'linux':
